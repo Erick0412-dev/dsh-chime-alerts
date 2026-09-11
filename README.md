@@ -10,7 +10,7 @@
 - **并行/后台任务逐个响**：3 个并行子代理分别完成 = 3 声（节流按种类+来源独立）
 - **宿主蜂鸣跨平台**：Windows 播系统 wav（`wscript`+WMP）；Linux 播 freedesktop 主题音（`canberra-gtk-play` → 回退 `paplay`）；macOS 用 `afplay` 播系统音
 - **声音可替换**：每事件可换内置音或上传自定义音频（动态 ≤5MB / 静态 ≤3MB）
-- **中英双语界面**、**Node 可跑的自动化测试**（`npm test`，221 项断言）
+- **中英双语界面**、**Node 可跑的自动化测试**（`npm test`，244 项断言）
 
 ## 默认声音
 
@@ -38,9 +38,9 @@ dsh plugin --profile web add dsh-chime-alerts
 然后在 profile 目录执行 `pnpm install`，再重启 DSH + 重开网页标签。
 
 - 宿主半（事件记录 + 系统蜂鸣）经 `lib/index.js` 自动加载；客户端半（浏览器合成音 + 设置页 + 工作区静音）经 `exports["./client"]` 以经典脚本加载（`dsh.client.platform: "web"`）
-- 客户端直接订阅 DSH 会话/工作区快照检测事件，无需动态桥；设置存浏览器（键与动态版相同，**切换安装方式设置自动继承**）
-- **静态版差异**：「插件授权」无快照信号（仅宿主蜂鸣兜底）、「其他打断」并入「任务完成」、自定义音频存浏览器且上限 3MB；其余（总开关 / 宿主蜂鸣开关 / 每事件宿主音下拉 / 宿主静音 / 宿主试听）与动态版一致
-- 设置页底部显示**版本号**（如「静态版 v0.5.7」），便于确认页面已加载最新代码
+- 客户端直接订阅 DSH 会话/工作区快照检测「任务完成 / 子任务完成 / 后台任务 / 目标受阻」；「需要授权 / Agent 提问 / 计划评审 / 插件授权」快照里没有信号（`pendingInteraction` 不在会话列表快照内），改由宿主半检测后经 `/dsh-chime-alerts/events` 增量转发；设置存浏览器（键与动态版相同，**切换安装方式设置自动继承**）
+- **静态版差异**：「其他打断」并入「任务完成」（快照无 turn 结束原因字段）、自定义音频存浏览器且上限 3MB；其余（十类事件、总开关 / 宿主蜂鸣开关 / 每事件宿主音下拉 / 宿主静音 / 宿主试听 / 工作区静音）与动态版一致
+- 设置页底部显示**版本号**（如「静态版 v0.5.8」），便于确认页面已加载最新代码
 
 ### 方式 B：动态插件（免安装，重启 DSH 后需重新部署）
 
@@ -60,8 +60,8 @@ dsh plugin --profile web add dsh-chime-alerts
 
 ## 工作原理
 
-- 宿主半监听 `agent/status`（完成/打断/子任务）、`session/event`（授权、目标受阻）、`tools/execute`（提问、计划评审）、`tools/result`（插件授权，v0.4.4+）、`jobs.onJobDone`（后台任务完成/失败，静态安装延迟挂接，v0.5.4+），节流 3s（种类+来源）后入事件缓冲
-- 动态客户端每 700ms 拉取播放；15 秒以上旧事件跳过；boot 令牌防版本串扰；完成/打断类 800ms 防抖，主代理 `inbox.hasPending` 跳过。静态客户端直接订阅 `sessions`/`workspaces` 快照检测（running 边沿 / pendingInteraction / goal 投影 / jobsBySession 终态）
+- 宿主半监听 `agent/status`（完成/打断/子任务）、`session/event`（授权）、`goal/changed`（目标受阻）、`tools/execute`（提问、计划评审）、`tools/result`（插件授权，v0.4.4+）、`jobs.onJobDone`（后台任务完成/失败，静态安装延迟挂接，v0.5.4+），节流 3s（种类+来源）后入事件缓冲
+- 动态客户端每 700ms 拉取播放；15 秒以上旧事件跳过；boot 令牌防版本串扰；完成/打断类 800ms 防抖，主代理 `inbox.hasPending` 跳过。静态客户端订阅 `sessions`/`workspaces` 快照检测「完成 / 子任务 / 后台任务 / 目标受阻」（running 边沿 / goal 投影 / jobsBySession 终态），并每 1500ms 拉 `/dsh-chime-alerts/events` 补齐「授权 / 提问 / 计划评审 / 插件授权」（宿主只对这四类入队，与快照自检不重叠）
 - 浏览器音零音频文件；系统蜂鸣 Windows 走临时 `.vbs` + `wscript.exe` + WMP（避开安全软件拦截 PowerShell；静态安装经 node:fs 直写，v0.5.4+），Linux/macOS 见上
 
 ## 已知限制
@@ -69,8 +69,9 @@ dsh plugin --profile web add dsh-chime-alerts
 - 仅覆盖本 DSH 进程内宿主能观察到的事件
 - 浏览器音需要页面开着；页面关闭时只有宿主蜂鸣（需开启）
 - **Linux / macOS 分支已实现并通过 Node 模拟测试，但尚未在真实机器上实测**；Windows 为本机实测平台
-- 轮询延迟 ≤~1.5s（700ms 轮询 + 800ms 防抖）
+- 轮询延迟：动态版 ≤~1.5s（700ms 轮询 + 800ms 防抖）；静态版「完成/子任务/后台/目标受阻」为准实时（快照订阅），「授权/提问/计划评审/插件授权」≤~1.5s（1500ms 轮询 + 宿主 3s 节流）
 - 设置导航扬声器图标与工作区静音按钮依赖外壳 DOM 结构（CSS hack / 固定定位注入），外壳改版需同步适配
+- **依赖 DSH 内部契约**：事件名与参数签名（`session/event` 三参、`goal/changed`、`Session.ownEvents()`、`SessionSummary` 字段）不是公开 API，DSH 升级可能再次漂移；本仓库的测试用真实契约做回归（见 `tools/test-host.mjs` 的「契约回归」与 `tools/test-client-web.mjs` 的 `/events` 用例），升级 DSH 后请先跑 `npm test`
 
 ## 仓库结构
 
@@ -90,8 +91,9 @@ docs/REGISTRIES.md   社区市场上架指南
 本插件由 AI Agent 工具辅助开发（功能设计、代码实现、代码审计、测试与文档），详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ```sh
-npm test      # 宿主 85 + 客户端 97 + 静态客户端 39 项断言（Node 即可，无需浏览器/DSH）
-npm run check # 语法检查
+npm test      # 宿主 101 + 客户端 96 + 静态客户端 47 项断言（Node 即可，无需浏览器/DSH）
+npm run check # 语法检查 + .chunks 与源码一致性检查
+npm run chunks # 改完 lib/host.js 或 lib/client.js 后重建动态安装用的 .chunks/*.txt
 ```
 
 ## 发布与上架

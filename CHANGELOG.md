@@ -1,5 +1,18 @@
 # 更新日志
 
+## v0.5.8
+
+**适配 DSH 0.1.5-rc.1 的契约变更**——此前四类提醒静默失效（不报错、不响，最容易被当成"插件坏了"）。全部按当前运行时的真实签名/类型核对后修正，并补上把旧契约钉死的回归测试：
+
+- **修复「需要授权」在动态安装下永不触发**：`session/event` 的真实签名是 `(this: Scoped<Session>, session, event)`——形参**两个**（`this` 是 `dsh-scope` 的派发接收器、不作实参），所以 event 落在 listener 的**第三个**位置。旧代码声明 `(session, event)`，拿到的是 session，`event.type === 'approval/asked'` 恒为 false。修正后浏览器音与宿主蜂鸣的授权音恢复
+- **修复「任务完成 / 子任务完成 / 其他打断」全灭**：旧代码读 `agent.session.events` 取最后一条 `turn/end` 的 `reason.kind`，但当前 `Session` 类**没有** `events` 成员（只有 `ownEvents()` / `snapshotEvents()` / `eventAt()`），`reason` 恒为 `undefined` 并在 `if (reason === undefined) return` 处直接退出。改为 `ownEvents()` 优先、`snapshotEvents()` 兜底（恢复/分叉会话的继承段），只回扫尾部 200 条
+- **修复「目标受阻」永不触发**：Cordis 事件名是 `goal/changed`（带 s），payload 为 `{ agent, change }`（`GoalChanged = { operation, ref?, goal? }`）。旧代码监听的是 `goal/change`——那是**会话日志事件**的名字，不是 Cordis 事件，监听器根本没挂上。判定沿用 `operation === 'block'` 或 `change.goal.phase === 'blocked'`
+- **修复静态安装下「需要授权 / Agent 提问 / 计划评审 / 插件授权」浏览器侧不响**：静态客户端原读 `row.pendingInteraction`，但当前 `SessionSummary` 没有该字段（它由 `dsh-client-ui-session` 单独维护，只经 slot 的 `useSessionPendingInteraction` prop 暴露给 React 组件），恒为 `undefined`。新增宿主 HTTP 端点 `/dsh-chime-alerts/events`，把宿主已检测到的这四类增量下发给浏览器，客户端每 1500ms 拉取播放；宿主**只**对这四类入队，`complete/subcomplete/jobdone/jobfail/goalblocked` 仍由浏览器快照自检，不会双响
+- `dsh.client.inject` 修正：移除当前依赖树中已无任何包引用的 `@deepseek-ai/dsh-client-runtime`，改列真正提供服务包 `sessions` ← `@deepseek-ai/dsh-api-session-controller`、`workspaces` ← `@deepseek-ai/dsh-api-workspace-controller`
+- `lib/types/index.d.ts` 重写：旧声明导出的 `export default function` 与实现（`export const inject` / `export function apply`）不符，且 JSDoc 还写着 PowerShell 蜂鸣与不存在的 README 章节
+- 工具链：`tools/chunk-src.mjs` 增加 `--verify`，`npm test` / `npm run check` 会校验 `.chunks/host.txt`、`.chunks/client.txt` 与源码一致（`.chunks/host.txt` 此前比 `lib/host.js` 落后约 26%，按 README 方式 B 粘贴会装到旧宿主）；新增 `npm run chunks`
+- 测试 244 项（宿主 101 / 客户端 96 / 静态客户端 47），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 只转发四类且 `after` 增量正确、快照 `pendingInteraction` 不再触发
+
 ## v0.5.7
 
 - **文档重构**：安装指南改为「静态安装（npm，推荐）→ 动态插件（免安装）」排序；补充 CLI 偶发漏注册 bundle 层时的两处手动检查（`dependencies` + `dsh.profile.bundles`）；删除「前身 dsh-chime / dsh-sound-alerts」历史行；版本号全链路对齐（package.json / 设置页版本标注 / 测试断言）

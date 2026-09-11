@@ -12,7 +12,7 @@ const ok = (cond, label) => {
   else { failures++; console.log('FAIL', label) }
 }
 
-function makeEnv(seedLocal, seedLib) {
+function makeEnv(seedLocal, seedLib, fetchHandler) {
   const storage = new Map()
   if (seedLocal !== undefined) storage.set('dsh-chime-alerts-v1', JSON.stringify(seedLocal))
   if (seedLib !== undefined) storage.set('dsh-chime-alerts-v1-audiolib', JSON.stringify(seedLib))
@@ -73,6 +73,7 @@ function makeEnv(seedLocal, seedLib) {
     register(options, component) { slotRegs.push({ options, component }) },
   }
 
+  const intervalFns = []
   const ctx = {
     sessions: {
       list: {
@@ -87,9 +88,33 @@ function makeEnv(seedLocal, seedLib) {
       },
     },
     slots,
-    interval() {},
+    interval(fn) { if (typeof fn === 'function') intervalFns.push(fn); return () => {} },
     timeout() {},
     effect() {},
+  }
+
+  // v0.5.8：默认 fetch 桩。宿主端点未单独打桩时返回「空但成功」的响应，
+  // 避免 /events 轮询把 hostApiAvailable 置 false 而影响其他用例。
+  // overrideFetch(fn) 只覆盖本次用例关心的端点，返回 null 时回落到默认桩。
+  const fetchCalls = []
+  const origFetch = globalThis.fetch
+  // 每个 env 独立：上一个用例的端点覆盖不得泄漏到下一个。
+  // 注意：/sysget 在 mod.apply() **同步**期间就会发出，所以需要覆盖它的用例
+  // 必须在 makeEnv 收尾之前就把 handler 传进来（第三个参数），不能等
+  // makeEnv 返回后再 env.overrideFetch(...)。
+  let fetchOverride = typeof fetchHandler === 'function' ? fetchHandler : null
+  globalThis.fetch = (url, opts) => {
+    const u = String(url)
+    fetchCalls.push({ url: u, opts: opts || {} })
+    if (fetchOverride !== null) {
+      const custom = fetchOverride(u, opts || {})
+      if (custom !== null && custom !== undefined) return custom
+    }
+    if (u.indexOf('/events') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, boot: 'b', seq: 0, events: [] }) })
+    if (u.indexOf('/sysget') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, hostBeep: false, capBeep: true }) })
+    if (u.indexOf('/sysset') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    if (u.indexOf('/sysbeep') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
   }
 
   let captured = null
@@ -109,6 +134,14 @@ function makeEnv(seedLocal, seedLib) {
     inject: mod.inject,
     setSessions(next) { sessSnap = next; for (const fn of sessListeners) fn() },
     setWorkspaces(items) { wsSnap = { items }; for (const fn of wsListeners) fn() },
+    // v0.5.8：跑一遍插件注册的 ctx.interval 回调（真实环境由 timer 服务周期触发）
+    // v0.5.8：跑一遍插件注册的 ctx.interval 回调（真实环境由 timer 服务周期触发）
+    runIntervals() { for (const fn of intervalFns) { try { fn() } catch (err) {} } },
+    intervalCount() { return intervalFns.length },
+    intervalCount() { return intervalFns.length },
+    fetchCalls,
+    overrideFetch(fn) { fetchOverride = fn },
+    restoreFetch() { globalThis.fetch = origFetch },
     push: () => {},
   }
   mod.apply(ctx)
@@ -133,6 +166,9 @@ function render(node) {
   return out
 }
 const byText = (nodes, text) => nodes.find((n) => n.children !== undefined && n.children.some((c) => String(c).indexOf(text) === 0))
+
+/** 让已排队的微任务/一次宏任务跑完，用于等待 fetch 链与 .then 回调。 */
+const flush = () => new Promise((r) => setTimeout(r, 0))
 
 // 1. ModuleLoader 封套 + 设置分区注册
 {
@@ -185,19 +221,124 @@ const byText = (nodes, text) => nodes.find((n) => n.children !== undefined && n.
   ok(env.oscs.length === before2, 'subagent job 不重复响（跳过）')
 }
 
-// 5. pendingInteraction → approval / question / planreview
+// 5. v0.5.8：approval / question / planreview 改由宿主事件端点驱动。
+// 当前 DSH 的 SessionSummary 没有 pendingInteraction 字段（由 dsh-client-ui-session
+// 单独维护、只经 slot 的 useSessionPendingInteraction prop 暴露），旧实现恒不触发。
 {
+  // 5a. 快照里带 pendingInteraction 再也不该响（钉死旧失效路径，防止回退）
   const env = makeEnv()
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } }, jobsBySession: {} })
   const n0 = env.oscs.length
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true, pendingInteraction: 'approval' } }, jobsBySession: {} })
-  ok(env.oscs.length > n0, 'pendingInteraction=approval → 播放')
+  ok(env.oscs.length === n0, '快照 pendingInteraction 不再触发（该字段不存在于 SessionSummary）')
+}
+{
+  // 5b. 宿主 /events 首轮只对齐游标，不补响历史事件
+  const env = makeEnv()
+  let seq = 0
+  const deliver = [{ seq: 1, kind: 'approval', sessionId: 's1', at: Date.now() }]
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      const body = u.indexOf('after=0') >= 0
+        ? { ok: true, boot: 'b', seq: 1, events: deliver }
+        : { ok: true, boot: 'b', seq: seq, events: [] }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length === 0, '/events 首轮只对齐游标（不补响历史）')
+}
+{
+  // 5c. 首轮之后的新事件：approval / question / planreview / pluginapproval 都要响
+  const env = makeEnv()
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals() // 首轮对齐游标
+  await flush()
+  const n0 = env.oscs.length
+  batch = [{ seq: 2, kind: 'approval', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n0, '宿主 /events 的 approval → 播放')
+
   const n1 = env.oscs.length
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true, pendingInteraction: 'plan-review' } }, jobsBySession: {} })
-  ok(env.oscs.length > n1, 'pendingInteraction=plan-review → 播放')
+  batch = [{ seq: 3, kind: 'question', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n1, '宿主 /events 的 question → 播放')
+
   const n2 = env.oscs.length
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true, pendingInteraction: 'question' } }, jobsBySession: {} })
-  ok(env.oscs.length > n2, 'pendingInteraction=question → 播放')
+  batch = [{ seq: 4, kind: 'planreview', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n2, '宿主 /events 的 planreview → 播放')
+
+  const n3 = env.oscs.length
+  batch = [{ seq: 5, kind: 'pluginapproval', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n3, '宿主 /events 的 pluginapproval → 播放')
+}
+{
+  // 5d. 宿主已节流、浏览器按事件 seq 去重：同一 seq 只响一次
+  const env = makeEnv()
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals()
+  await flush()
+  const n0 = env.oscs.length
+  batch = [{ seq: 7, kind: 'approval', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  const afterFirst = env.oscs.length
+  ok(afterFirst > n0, '宿主事件按 seq 播放')
+  // 同一批事件重复到达（seq 相同）不再响
+  batch = [{ seq: 7, kind: 'approval', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length === afterFirst, '同一 seq 事件不重复播放')
+}
+{
+  // 5e. 被静音工作区的宿主转发事件也不响
+  const env = makeEnv({ master: true, webBeep: true, notifyEnabled: false, muted: ['w1'], kinds: {} })
+  env.setWorkspaces([{ workspaceId: 'w1', title: 'K230', sessionIds: ['s1'] }])
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals()
+  await flush()
+  batch = [{ seq: 2, kind: 'approval', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length === 0, '宿主转发事件同样受工作区静音约束')
 }
 
 // 6. goal 投影 blocked → goalblocked
@@ -243,16 +384,10 @@ const byText = (nodes, text) => nodes.find((n) => n.children !== undefined && n.
 
 // 9b. 宿主设置同步：启动读 /sysget；开关点击走 /sysset
 {
-  const calls = []
-  const origFetch = globalThis.fetch
-  globalThis.fetch = (url, opts) => {
-    const u = String(url)
-    calls.push({ url: u, opts: opts || {} })
-    if (u.indexOf('/sysget') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, hostBeep: false, capBeep: true }) })
-    if (u.indexOf('/sysset') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
-    return Promise.reject(new Error('unexpected fetch ' + u))
-  }
+  // v0.5.8：不再自建 fetch 桩——makeEnv 已装默认桩并记录调用，避免用例之间
+  // 替换/恢复 globalThis.fetch 造成泄漏。
   const env = makeEnv()
+  const calls = env.fetchCalls
   ok(calls.some((c) => c.url.indexOf('/sysget') >= 0), '启动时读取宿主设置（/sysget）')
   // 在未拍平的组件树上找到「宿主蜂鸣」snd-master 行,取该行内的 switch 按钮
   const root = env.slotRegs.find((r) => r.options.name === 'settings.section').component()
@@ -298,22 +433,15 @@ const byText = (nodes, text) => nodes.find((n) => n.children !== undefined && n.
   const before = calls.length
   hostSwitchOnClick()
   ok(calls.length > before && calls.slice(before).some((c) => c.url.indexOf('/sysset') >= 0), '切换后写宿主设置（/sysset）')
-  globalThis.fetch = origFetch
 }
 
 // 9c. v0.5.5：宿主蜂鸣开启时每事件展开「宿主音」行（下拉/单独静音/宿主试听）+ 版本标注
 {
-  const calls = []
-  const origFetch = globalThis.fetch
-  globalThis.fetch = (url, opts) => {
-    const u = String(url)
-    calls.push({ url: u, opts: opts || {} })
+  const env = makeEnv(undefined, undefined, (u) => {
     if (u.indexOf('/sysget') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, hostBeep: true, hostSounds: {}, hostMuted: {}, platform: 'win32', capBeep: true }) })
-    if (u.indexOf('/sysset') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
-    if (u.indexOf('/sysbeep') >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
-    return Promise.reject(new Error('unexpected fetch ' + u))
-  }
-  const env = makeEnv()
+    return null
+  })
+  const calls = env.fetchCalls
   await new Promise((r) => setTimeout(r, 10))
   const page = render(env.slotRegs.find((r) => r.options.name === 'settings.section').component())
   const hostRows = page.filter((n) => n.type === 'div' && typeof n.props.className === 'string' && n.props.className.indexOf('snd-hostrow') >= 0)
@@ -333,8 +461,7 @@ const byText = (nodes, text) => nodes.find((n) => n.children !== undefined && n.
   const before3 = calls.length
   hostPreviews[2].props.onClick()
   ok(calls.length > before3 && calls.slice(before3).some((c) => c.url.indexOf('/sysbeep') >= 0), '宿主试听调 /sysbeep')
-  ok(byText(page, '静态版 v0.5.7') !== undefined, '设置页底部标注版本 v0.5.7')
-  globalThis.fetch = origFetch
+  ok(byText(page, '静态版 v0.5.8') !== undefined, '设置页底部标注版本 v0.5.8')
 }
 
 // 9d. v0.5.6：useVersion 必须函数式更新（setState(x => x + 1)）。闭包捕获初值
@@ -354,12 +481,27 @@ const byText = (nodes, text) => nodes.find((n) => n.children !== undefined && n.
   ok(typeof last === 'function' && last(41) === 42, 'setState 使用函数式更新（x => x + 1），连续 bump 不会被吞掉')
 }
 
-// 10. 网页通知触发
+// 10. 网页通知触发（v0.5.8：改由宿主事件端点驱动）
 {
   const env = makeEnv()
   env.setWorkspaces([{ workspaceId: 'w1', title: 'K230', sessionIds: ['s1'] }])
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true, pendingInteraction: 'approval' } }, jobsBySession: {} })
-  ok(env.notifications.length > 0, 'approval 触发网页通知')
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals()
+  await flush()
+  batch = [{ seq: 2, kind: 'approval', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.notifications.length > 0, '宿主转发的 approval 触发网页通知')
 }
 
 // 11. 从 localStorage 读回设置（webBeep=false → 不播放；自定义音频库可见）

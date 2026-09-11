@@ -106,12 +106,72 @@ function makeEnv(opts = {}) {
   return { handlers, spawns, jobDoneFns, emit, emitService, pull, fsFiles, fsMock }
 }
 
+// 假 Session：只带当前 DSH **真实存在**的成员。
+// 关键：故意不提供 `.events`（Session 类没有该成员）——旧代码正是读它，
+// 于是 reason 恒为 undefined，complete/subcomplete/interrupt 永远不响。
+// v0.5.8 起宿主半改读 ownEvents() / snapshotEvents()。
+function fakeSession(id, origin, reasonKind, extra) {
+  const log = reasonKind === undefined ? [] : [{ type: 'turn/end', data: { reason: { kind: reasonKind } } }]
+  return Object.assign({
+    id,
+    header: { origin },
+    ownEvents: () => log,
+    snapshotEvents: () => log,
+    eventAt: () => undefined,
+  }, extra || {})
+}
+
 function agent(id, origin, reasonKind, hasPending = false) {
   return {
     id,
-    session: { header: { origin }, events: [{ type: 'turn/end', data: { reason: { kind: reasonKind } } }] },
+    session: fakeSession(id, origin, reasonKind),
     inbox: { hasPending },
   }
+}
+
+// 发一条 session/event。真实契约是 THREE 个形参：
+//   'session/event'(this: Scoped<Session>, session: Session, event: SessionEvent)
+// `this` 是派发接收器、不作实参，所以实参是 (session, event) 两个位置——
+// 即 event 落在 listener 的**第三个**形参上（第一个被 session 占据）。
+function sessionEvent(env, session, event) {
+  env.emit('session/event', undefined, session, event)
+}
+
+// 0. 契约回归（v0.5.8）：这两条把旧 DSH 契约钉死，防止再次漂移
+{
+  // 0a. 旧两参形态必须**不**触发 approval——真实 DSH 会把 event 放在第三个形参，
+  //     旧代码声明 (session, event) 时拿到的是 session。
+  const env = makeEnv()
+  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
+  ok(!env.pull().events.some((e) => e.kind === 'approval'), '旧两参 session/event 不触发 approval（契约已变）')
+}
+{
+  // 0b. 真实三参形态必须触发
+  const env = makeEnv()
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
+  ok(env.pull().events.some((e) => e.kind === 'approval'), '三参 session/event 触发 approval')
+}
+{
+  // 0c. Session 只有 .events（无 ownEvents/snapshotEvents）时不得判定完成——
+  //     真实 Session 没有 .events，旧实现依赖它，三类声音全灭。
+  const env = makeEnv()
+  const onlyEvents = { id: 'root', header: { origin: 'main' }, events: [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }] }
+  env.emit('agent/status', { agent: { id: 'root', session: onlyEvents, inbox: {} }, status: 'running' })
+  env.emit('agent/status', { agent: { id: 'root', session: onlyEvents, inbox: {} }, status: 'idle' })
+  ok(!env.pull().events.some((e) => e.kind === 'complete'), '仅 .events 的 Session 不判完成（真实 Session 无该成员）')
+}
+{
+  // 0d. ownEvents() 为空、snapshotEvents() 有值时（恢复/分叉会话的继承段）仍要判定
+  const env = makeEnv()
+  const restored = {
+    id: 'root',
+    header: { origin: 'main' },
+    ownEvents: () => [],
+    snapshotEvents: () => [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }],
+  }
+  env.emit('agent/status', { agent: { id: 'root', session: restored, inbox: {} }, status: 'running' })
+  env.emit('agent/status', { agent: { id: 'root', session: restored, inbox: {} }, status: 'idle' })
+  ok(env.pull().events.some((e) => e.kind === 'complete'), 'ownEvents 为空时回退 snapshotEvents 判完成')
 }
 
 // 1. 任务完成
@@ -141,7 +201,7 @@ function agent(id, origin, reasonKind, hasPending = false) {
 // 4. 需要授权
 {
   const env = makeEnv()
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
   const ev = env.pull().events.find((e) => e.kind === 'approval')
   ok(ev !== undefined && ev.tool === 'write', 'approval/asked → approval（含工具名）')
 }
@@ -185,11 +245,23 @@ function agent(id, origin, reasonKind, hasPending = false) {
   ok(!env.pull().events.some((e) => e.kind === 'approval'), '其他工具结果不触发 approval')
 }
 
-// 7. 目标受阻
+// 7. 目标受阻（v0.5.8：Cordis 事件名是 goal/changed，payload = { agent, change }）
 {
   const env = makeEnv()
-  env.emit('session/event', { id: 'root' }, { type: 'goal/change', data: { operation: 'block', goal: { phase: 'blocked' } } })
-  ok(env.pull().events.some((e) => e.kind === 'goalblocked'), 'goal/change block → goalblocked')
+  env.emit('goal/changed', { agent: { id: 'root' }, change: { operation: 'block', ref: { id: 'g1' }, goal: { phase: 'blocked' } } })
+  ok(env.pull().events.some((e) => e.kind === 'goalblocked' && e.sessionId === 'root'), 'goal/changed operation=block → goalblocked')
+}
+// 7b. 只有 phase=blocked（operation 不是 block）也要响
+{
+  const env = makeEnv()
+  env.emit('goal/changed', { agent: { id: 'root' }, change: { operation: 'edit', goal: { phase: 'blocked' } } })
+  ok(env.pull().events.some((e) => e.kind === 'goalblocked'), 'goal/changed phase=blocked → goalblocked')
+}
+// 7c. 非受阻变更不响（回归：旧代码把 goal/change 当 Cordis 事件，监听器根本不挂）
+{
+  const env = makeEnv()
+  env.emit('goal/changed', { agent: { id: 'root' }, change: { operation: 'create', goal: { phase: 'active' } } })
+  ok(!env.pull().events.some((e) => e.kind === 'goalblocked'), 'goal/changed 非 block 不响')
 }
 
 // 8. 后台任务失败（bash 响；subagent 跳过避免与打断音双响）
@@ -215,15 +287,15 @@ function agent(id, origin, reasonKind, hasPending = false) {
 // 9. 节流（同种类同来源 3s 内只记一次）
 {
   const env = makeEnv()
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: { toolName: 'x' } })
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: { toolName: 'y' } })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'x' } })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'y' } })
   ok(env.pull().events.filter((e) => e.kind === 'approval').length === 1, '3s 节流生效')
 }
 
 // 10. 拉取过滤（after 序号；v0.3.8 固定监听所有会话，sessionId 参数忽略）
 {
   const env = makeEnv()
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: {} })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: {} })
   const all = env.handlers.pull({ sessionId: null, after: 0 })
   ok(env.handlers.pull({ sessionId: 'root', after: all.seq }).events.length === 0, 'after 序号过滤')
   ok(env.handlers.pull({ sessionId: 'nope', after: 0 }).events.length === 1, 'v0.3.8 固定监听所有会话（sessionId 参数忽略）')
@@ -235,7 +307,7 @@ function agent(id, origin, reasonKind, hasPending = false) {
   ok(env.handlers.sysbeep({ kind: 'complete' }).ok === true, 'sysbeep 已知种类')
   ok(env.handlers.sysbeep({ kind: 'nope' }).ok === false, 'sysbeep 未知种类拒绝')
   env.handlers.setalways({ enabled: true })
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: {} })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: {} })
   await new Promise((r) => setTimeout(r, 30))
   ok(env.spawns.length >= 1, 'alwaysBeep 开启后记录事件触发系统蜂鸣')
   const found = env.spawns.some((sp) => {
@@ -255,7 +327,7 @@ function agent(id, origin, reasonKind, hasPending = false) {
   ok(s1.ok === true, 'sysset 写入本地成功')
   const g2 = await env.handlers.sysget({})
   ok(g2.hostBeep === true, 'sysget 读回已存 hostBeep')
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: {} })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: {} })
   await new Promise((r) => setTimeout(r, 30))
   ok(env.spawns.length >= 1, 'hostBeep=true 后记录事件触发系统蜂鸣')
   const s2 = await env.handlers.sysset({ hostBeep: 'nope' })
@@ -370,7 +442,7 @@ function agent(id, origin, reasonKind, hasPending = false) {
   const env = makeEnv({ harnessExtra: { chimePlatformOverride: 'linux' } })
   await env.handlers.sysset({ hostSounds: { complete: 'bell' } })
   await env.handlers.sysset({ hostBeep: true })
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: {} })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: {} })
   await new Promise((r) => setTimeout(r, 30))
   const sp = env.spawns[env.spawns.length - 1]
   ok(sp !== undefined && sp.argv[0] === 'canberra-gtk-play' && sp.argv[1] === '--id=dialog-warning', 'linux 事件触发用默认 dialog-warning')
@@ -426,7 +498,7 @@ function agent(id, origin, reasonKind, hasPending = false) {
   const g = await env.handlers.sysget({})
   ok(g.hostMuted !== undefined && g.hostMuted.complete === true, 'sysget 读回 hostMuted')
   await env.handlers.sysset({ hostBeep: true })
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: {} })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: {} })
   await new Promise((r) => setTimeout(r, 30))
   const before = env.spawns.length
   ok(before >= 1, '未静音事件（approval）宿主音正常响')
@@ -454,11 +526,12 @@ function agent(id, origin, reasonKind, hasPending = false) {
     webServerRegister: (route) => { routes.push(route); return () => {} },
   })
   await new Promise((r) => setTimeout(r, 30))
-  ok(routes.length === 3, '无 harness 时注册 sysget/sysset/sysbeep HTTP 端点')
+  ok(routes.length === 4, '无 harness 时注册 sysget/sysset/sysbeep/events HTTP 端点')
   const sysgetRoute = routes.find((rt) => rt.path === '/dsh-chime-alerts/sysget')
   const syssetRoute = routes.find((rt) => rt.path === '/dsh-chime-alerts/sysset')
   const sysbeepRoute = routes.find((rt) => rt.path === '/dsh-chime-alerts/sysbeep')
-  ok(sysgetRoute !== undefined && syssetRoute !== undefined && sysbeepRoute !== undefined, '端点路径正确（sysget|sysset|sysbeep）')
+  const eventsRoute = routes.find((rt) => rt.path === '/dsh-chime-alerts/events')
+  ok(sysgetRoute !== undefined && syssetRoute !== undefined && sysbeepRoute !== undefined && eventsRoute !== undefined, '端点路径正确（sysget|sysset|sysbeep|events）')
   if (sysgetRoute !== undefined) {
     let status = 0
     let body = ''
@@ -532,6 +605,43 @@ function agent(id, origin, reasonKind, hasPending = false) {
     await sysbeepRoute.handler({ method: 'GET' }, getRes)
     ok(getStatus === 405, 'sysbeep GET 405')
   }
+  // v0.5.8：/events 端点——静态客户端唯一的「宿主→浏览器」事件通道。
+  // 只转发快照拿不到的四类；complete 等不入队（避免与浏览器自检双响）。
+  if (eventsRoute !== undefined) {
+    const call = async (url) => {
+      let status = 0
+      let body = ''
+      const res = { writeHead: (s) => { status = s }, end: (b) => { body = String(b || '') } }
+      await eventsRoute.handler({ method: 'GET', url }, res)
+      return { status, data: body ? JSON.parse(body) : null }
+    }
+    const empty = await call('/dsh-chime-alerts/events?after=0')
+    ok(empty.status === 200 && empty.data.ok === true && empty.data.events.length === 0, '/events 初始为空')
+    ok(Array.isArray(empty.data.kinds) && empty.data.kinds.indexOf('approval') >= 0 && empty.data.kinds.indexOf('complete') < 0, '/events kinds 只含需转发的四类')
+
+    // 三类入队 + complete 不入队
+    sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
+    env.emit('tools/execute', { name: 'ask_user_question', agent: { id: 'root' } }, () => {})
+    env.emit('tools/execute', { name: 'exit_plan_mode', agent: { id: 'root' } }, () => {})
+    env.emit('agent/status', { agent: agent('root', 'main', 'completed'), status: 'running' })
+    env.emit('agent/status', { agent: agent('root', 'main', 'completed'), status: 'idle' })
+
+    const first = await call('/dsh-chime-alerts/events?after=0')
+    const kinds = first.data.events.map((e) => e.kind)
+    ok(kinds.indexOf('approval') >= 0 && kinds.indexOf('question') >= 0 && kinds.indexOf('planreview') >= 0, '/events 转发 approval/question/planreview')
+    ok(kinds.indexOf('complete') < 0, '/events 不转发 complete（浏览器快照自检，避免双响）')
+    ok(first.data.events.every((e) => typeof e.seq === 'number'), '/events 每条带递增 seq')
+
+    // after 增量：用返回的 seq 再拉应无新事件
+    const second = await call('/dsh-chime-alerts/events?after=' + String(first.data.seq))
+    ok(second.data.events.length === 0 && second.data.seq === first.data.seq, '/events after 增量过滤')
+
+    // 非 GET 拒绝
+    let postStatus = 0
+    const postRes = { writeHead: (s) => { postStatus = s }, end: () => {} }
+    await eventsRoute.handler({ method: 'POST', url: '/dsh-chime-alerts/events' }, postRes)
+    ok(postStatus === 405, '/events POST 405')
+  }
 }
 
 // 21b. v0.5.4：静态宿主半的蜂鸣 vbs 走 nodeIo 直通车（不依赖沙箱 fs 的 danger-full-access 重试）
@@ -541,7 +651,7 @@ function agent(id, origin, reasonKind, hasPending = false) {
   ]
   const env = makeEnv({ noHarness: true, preseed, webServerRegister: () => () => {} })
   await new Promise((r) => setTimeout(r, 30))
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: {} })
+  sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: {} })
   await new Promise((r) => setTimeout(r, 30))
   const sp = env.spawns.find((s) => Array.isArray(s.argv) && typeof s.argv[0] === 'string' && s.argv[0].indexOf('wscript') >= 0)
   ok(sp !== undefined, '静态宿主蜂鸣 spawn wscript')
