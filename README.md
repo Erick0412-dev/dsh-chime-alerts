@@ -10,7 +10,7 @@
 - **并行/后台任务逐个响**：3 个并行子代理分别完成 = 3 声（节流按种类+来源独立）
 - **宿主蜂鸣跨平台**：Windows 播系统 wav（`wscript`+WMP）；Linux 播 freedesktop 主题音（`canberra-gtk-play` → 回退 `paplay`）；macOS 用 `afplay` 播系统音
 - **声音可替换**：每事件可换内置音或上传自定义音频（动态 ≤5MB / 静态 ≤3MB）
-- **中英双语界面**、**Node 可跑的自动化测试**（`npm test`，244 项断言）
+- **中英双语界面**、**Node 可跑的自动化测试**（`npm test`，247 项断言）
 
 ## 默认声音
 
@@ -97,7 +97,7 @@ docs/REGISTRIES.md   社区市场上架指南
 本插件由 AI Agent 工具辅助开发（功能设计、代码实现、代码审计、测试与文档），详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ```sh
-npm test      # 宿主 101 + 客户端 96 + 静态客户端 47 项断言（Node 即可，无需浏览器/DSH）
+npm test      # 宿主 104 + 客户端 96 + 静态客户端 47 项断言（Node 即可，无需浏览器/DSH）
 npm run check # 语法检查 + .chunks 与源码一致性检查
 npm run chunks # 改完 lib/host.js 或 lib/client.js 后重建动态安装用的 .chunks/*.txt
 ```

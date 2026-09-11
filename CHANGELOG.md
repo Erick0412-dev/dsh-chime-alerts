@@ -15,7 +15,7 @@
 - `dsh.client.inject` 修正：移除当前依赖树中已无任何包引用的 `@deepseek-ai/dsh-client-runtime`，改列真正提供服务包 `sessions` ← `@deepseek-ai/dsh-api-session-controller`、`workspaces` ← `@deepseek-ai/dsh-api-workspace-controller`
 - `lib/types/index.d.ts` 重写：旧声明导出的 `export default function` 与实现（`export const inject` / `export function apply`）不符，且 JSDoc 还写着 PowerShell 蜂鸣与不存在的 README 章节
 - 工具链：`tools/chunk-src.mjs` 增加 `--verify`，`npm test` / `npm run check` 会校验 `.chunks/host.txt`、`.chunks/client.txt` 与源码一致（`.chunks/host.txt` 此前比 `lib/host.js` 落后约 26%，按 README 方式 B 粘贴会装到旧宿主）；新增 `npm run chunks`
-- 测试 244 项（宿主 101 / 客户端 96 / 静态客户端 47），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 只转发四类且 `after` 增量正确、快照 `pendingInteraction` 不再触发
+- 测试 247 项（宿主 104 / 客户端 96 / 静态客户端 47），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 只转发四类且 `after` 增量正确、快照 `pendingInteraction` 不再触发；另新增两条「求值形态」回归：把 `lib/host.js` 分别当**动态**（无 `__nodeIo` 注入）与**静态**函数体求值都必须能 apply
 
 ## v0.5.7
 
