@@ -2,7 +2,9 @@
 
 ## v0.5.8
 
-**适配 DSH 0.1.5-rc.1 的契约变更**——此前四类提醒静默失效（不报错、不响，最容易被当成"插件坏了"）。全部按当前运行时的真实签名/类型核对后修正，并补上把旧契约钉死的回归测试：
+**适配 DSH 0.1.5-rc.1 的契约变更**——此前四类提醒静默失效（不报错、不响，最容易被当成"插件坏了"）。全部按当前运行时的真实签名/类型核对后修正，并补上把旧契约钉死的回归测试。其中两条是用**只读动态探针**在真实 DSH 进程里实测发现的，会另记来源：
+
+- **修复动态安装完全装不起来（实测发现）**：`lib/host.js` 里的 `const nodeIo = __nodeIo` 裸引用了一个**只由静态入口 `lib/index.js` 用 `new Function('ctx','harness','__nodeIo', …)` 注入**的标识符。动态安装（把该文件全文粘进 `cordis_define` 的 `code.host`）里这个标识符根本没有声明，于是 `cordis_run` 直接 `ReferenceError: __nodeIo is not defined`。而 README 方式 B 恰恰教用户粘这个文件——**动态安装路径自 v0.5.3 引入静态直通车起就是断的**，没人发现，因为没有测试覆盖"把 lib/host.js 当动态函数体求值"。改为 `typeof __nodeIo !== 'undefined'` 探测（对未声明标识符安全）。新增断言：把 `lib/host.js` 当**动态**函数体（第三参传 undefined）求值并 apply，不得抛错。
 
 - **修正「需要授权」的检测方式：按形状识别，不按实参位置推断**。`session/event` 的**类型声明**是 `(this: Scoped<Session>, session, event)`，看起来 event 在第三个位置；但用运行时探针（`probe-1`，只读）实测，listener 实际只收到**两个**实参：`args[0]=Session`、`args[1]=SessionEvent`（`argCounts={"2":n}`、`eventAt=[1]`、`argTypes` 恒为 `["Session","SessionEvent"]`）。因此**位置推断是个陷阱**：声明 `(session, event)` 就拿到 Session（旧代码即如此，只因恰好参数个数吻合才「碰对」），声明 `(session, second, third)` 则第三个恒为 `undefined`、整个 handler 直接提前返回（本轮修复过程中真实踩到，一个 `if (event === undefined) return` 就把授权音重新关掉了）。现改为遍历实参、挑出「有 string `type` 且带 `data` 字段」的对象作为事件、「有 `id` + `snapshotEvents()`/`append()`」的对象作为 Session——两参/三参/更多布局都能工作，并由测试同时守住这两种布局
 - 同时为 `agent/status` 的 `turn/end` 原因读取加两条兜底路径（`payload.session`、`agents.get(id).session`），避免再次因对象挂载位置变化而静默失效

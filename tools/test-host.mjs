@@ -94,7 +94,13 @@ function makeEnv(opts = {}) {
         dirname: (p) => p.replace(/[\\/][^\\/]+$/, ''),
       }
     : undefined
-  const plugin = new Function('ctx', 'harness', '__nodeIo', source)(ctx, harness, nodeIo)
+  // 动态安装把 lib/host.js 当函数体求值时**没有第三个实参**（__nodeIo 未声明），
+  // 静态安装才有。两种调用形态都必须能 apply —— v0.5.8 之前裸引用 __nodeIo，
+  // 动态形态会 ReferenceError，而 README 方式 B 正是教用户粘这个文件。
+  const dynamicLike = opts.dynamicLike === true
+  const plugin = dynamicLike
+    ? new Function('ctx', 'harness', source)(ctx, harness)
+    : new Function('ctx', 'harness', '__nodeIo', source)(ctx, harness, nodeIo)
   plugin.apply(ctx)
   const emit = (event, ...args) => { for (const fn of listeners[event] ?? []) fn(...args) }
   // v0.5.4：模拟 internal/service 事件（jobs 服务晚挂载）
@@ -142,6 +148,28 @@ function sessionEventThreeArg(env, session, event) {
 }
 
 // 0. 契约回归（v0.5.8）：按形状而非位置识别，两种实参布局都必须工作
+{
+  // 0aa. 动态安装形态：lib/host.js 被当函数体、且**不注入** __nodeIo 时也必须能 apply。
+  //      回归：v0.5.8 之前这里会 ReferenceError: __nodeIo is not defined，
+  //      而 README 方式 B 就是教用户把 lib/host.js 粘进 cordis_define。
+  let threw = null
+  try {
+    makeEnv({ noHarness: false, dynamicLike: true })
+  } catch (err) {
+    threw = err
+  }
+  ok(threw === null, 'lib/host.js 可作为动态函数体求值并 apply（无 __nodeIo 注入）—— ' + (threw === null ? 'ok' : String(threw && threw.message)))
+}
+{
+  // 0ab. 静态形态（注入 nodeIo）同样必须能 apply
+  let threw = null
+  try {
+    makeEnv({ noHarness: true })
+  } catch (err) {
+    threw = err
+  }
+  ok(threw === null, 'lib/host.js 可作为静态函数体求值并 apply（注入 __nodeIo）')
+}
 {
   // 0a. 实测两参布局（真实运行时）必须触发
   const env = makeEnv()

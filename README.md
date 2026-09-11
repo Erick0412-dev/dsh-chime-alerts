@@ -48,6 +48,11 @@ dsh plugin --profile web add dsh-chime-alerts
 2. `cordis_run`（mode `run`）激活，客户端包首次激活需在页面上批准
 3. DSH 重启后按同样步骤重装；宿主音/自定义音频存本地磁盘，其余设置存浏览器，重装后自动恢复
 
+> **两条必须注意的坑（都实测踩过）**
+>
+> - **两半要放在同一个包里。** 后续用 `cordis_run` 的 `update` 切换版本时是**整包替换**，不是「只换宿主半」——如果你先只定义客户端半、再用一个 host-only 的新包去 update，会把它从浏览器里卸载掉（表现为设置页消失、浏览器不响），而 `cordis_inspect_self` 只会告诉你 `hasClientHalf: false`。改代码时请**一次性**给出 host+client 的新包。
+> - **别用 `.chunks/host.txt` 之外的旧文本**：`.chunks/*.txt` 由 `npm run chunks` 从 `lib/*.js` 生成、并由 `npm test` 校验一致（见下）；直接抄 README 之外的任何旧副本都可能装到过期宿主。
+
 ## 设置页
 
 设置 → 「🔊 声音提醒」：
