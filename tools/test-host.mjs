@@ -129,27 +129,38 @@ function agent(id, origin, reasonKind, hasPending = false) {
   }
 }
 
-// 发一条 session/event。真实契约是 THREE 个形参：
-//   'session/event'(this: Scoped<Session>, session: Session, event: SessionEvent)
-// `this` 是派发接收器、不作实参，所以实参是 (session, event) 两个位置——
-// 即 event 落在 listener 的**第三个**形参上（第一个被 session 占据）。
+// 发一条 session/event。**实测**（v0.5.8 的运行时探针）：listener 只收到两个实参
+//   args[0] = Session，args[1] = SessionEvent   （argCounts={"2":n}，eventAt=[1]）
+// 类型声明里写的 (this, session, event) 具有误导性——`this` 不是实参。因此事件
+// 在索引 1。宿主半不再按位置推断，而是按形状挑（见 isSessionEvent），
+// 所以下面两种布局都必须能触发；两条断言一起守住这个性质。
 function sessionEvent(env, session, event) {
-  env.emit('session/event', undefined, session, event)
+  env.emit('session/event', session, event)
+}
+function sessionEventThreeArg(env, session, event) {
+  env.emit('session/event', session, session, event)
 }
 
-// 0. 契约回归（v0.5.8）：这两条把旧 DSH 契约钉死，防止再次漂移
+// 0. 契约回归（v0.5.8）：按形状而非位置识别，两种实参布局都必须工作
 {
-  // 0a. 旧两参形态必须**不**触发 approval——真实 DSH 会把 event 放在第三个形参，
-  //     旧代码声明 (session, event) 时拿到的是 session。
-  const env = makeEnv()
-  env.emit('session/event', { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
-  ok(!env.pull().events.some((e) => e.kind === 'approval'), '旧两参 session/event 不触发 approval（契约已变）')
-}
-{
-  // 0b. 真实三参形态必须触发
+  // 0a. 实测两参布局（真实运行时）必须触发
   const env = makeEnv()
   sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
-  ok(env.pull().events.some((e) => e.kind === 'approval'), '三参 session/event 触发 approval')
+  const ev = env.pull().events.find((e) => e.kind === 'approval')
+  ok(ev !== undefined && ev.tool === 'write', '两参 session/event（实测布局）触发 approval 且带工具名')
+}
+{
+  // 0b. 三参布局（类型声明所示）也必须触发——未来 DSH 若真的补上第三个实参，
+  //     按位置推断的实现会再次静默失效，按形状挑的不会。
+  const env = makeEnv()
+  sessionEventThreeArg(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
+  ok(env.pull().events.some((e) => e.kind === 'approval'), '三参 session/event 也触发 approval')
+}
+{
+  // 0b2. 只有 Session、没有事件对象时不得误判（不能把 Session 当事件）
+  const env = makeEnv()
+  env.emit('session/event', { id: 'root' })
+  ok(!env.pull().events.some((e) => e.kind === 'approval'), '只给 Session 不误判为 approval')
 }
 {
   // 0c. Session 只有 .events（无 ownEvents/snapshotEvents）时不得判定完成——

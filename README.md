@@ -71,7 +71,8 @@ dsh plugin --profile web add dsh-chime-alerts
 - **Linux / macOS 分支已实现并通过 Node 模拟测试，但尚未在真实机器上实测**；Windows 为本机实测平台
 - 轮询延迟：动态版 ≤~1.5s（700ms 轮询 + 800ms 防抖）；静态版「完成/子任务/后台/目标受阻」为准实时（快照订阅），「授权/提问/计划评审/插件授权」≤~1.5s（1500ms 轮询 + 宿主 3s 节流）
 - 设置导航扬声器图标与工作区静音按钮依赖外壳 DOM 结构（CSS hack / 固定定位注入），外壳改版需同步适配
-- **依赖 DSH 内部契约**：事件名与参数签名（`session/event` 三参、`goal/changed`、`Session.ownEvents()`、`SessionSummary` 字段）不是公开 API，DSH 升级可能再次漂移；本仓库的测试用真实契约做回归（见 `tools/test-host.mjs` 的「契约回归」与 `tools/test-client-web.mjs` 的 `/events` 用例），升级 DSH 后请先跑 `npm test`
+- **依赖 DSH 内部契约**：事件名与参数签名（`goal/changed`、`Session.ownEvents()`、`SessionSummary` 字段）不是公开 API，DSH 升级可能再次漂移；本仓库的测试用真实契约做回归（见 `tools/test-host.mjs` 的「契约回归」与 `tools/test-client-web.mjs` 的 `/events` 用例），升级 DSH 后请先跑 `npm test`
+- **实参与类型声明可能不一致**：实测 `session/event` 的 listener 只收到 2 个实参（`Session`、`SessionEvent`），而 inspect 签名写的是 3 个位置参数；插件因此**按对象形状**而非实参位置识别（`type` 字段判事件、`id`+`snapshotEvents()` 判 Session），两种布局都能工作。同类坑：动态宿主半没有 `process`（故动态安装的平台检测恒为 null，走 win32 兼容分支），静态安装是真实 Node 模块、不受此限
 
 ## 仓库结构
 
