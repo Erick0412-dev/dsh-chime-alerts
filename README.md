@@ -76,6 +76,12 @@ dsh plugin --profile web add dsh-chime-alerts
 - **Linux / macOS 分支已实现并通过 Node 模拟测试，但尚未在真实机器上实测**；Windows 为本机实测平台
 - 轮询延迟：动态版 ≤~1.5s（700ms 轮询 + 800ms 防抖）；静态版「完成/子任务/后台/目标受阻」为准实时（快照订阅），「授权/提问/计划评审/插件授权」≤~1.5s（1500ms 轮询 + 宿主 3s 节流）
 - 设置导航扬声器图标与工作区静音按钮依赖外壳 DOM 结构（CSS hack / 固定定位注入），外壳改版需同步适配
+- **待修：工作区行内静音按钮在真实浏览器中未验证**（记录于 2026-09，尚未定位）。静态/动态客户端都用
+  `document.querySelectorAll('div[role="treeitem"][aria-expanded]')` 取工作区行，再把**整行 `textContent`** 与
+  工作区标题做**精确相等**匹配（`client.web.js` 的 `syncWorkspaceMuteButtons`）；匹配不上就 `continue` 静默跳过——
+  **按钮不出现且不报任何错**。因此只要外壳把行文本改成「标题 + 计数 / 图标 / 空白」之类，或在行内渲染了额外文本，
+  按钮就会整片消失而没有任何迹象。已知代码层面该 role/属性确实存在（`dsh-client-ui-workspace`），但**尚未在真实
+  DOM 上确认匹配成功**；现象待复现后再决定改法（候选：改用行元素上的稳定标识而非文本、或加一次匹配失败告警日志）
 - **依赖 DSH 内部契约**：事件名与参数签名（`goal/changed`、`Session.ownEvents()`、`SessionSummary` 字段）不是公开 API，DSH 升级可能再次漂移；本仓库的测试用真实契约做回归（见 `tools/test-host.mjs` 的「契约回归」与 `tools/test-client-web.mjs` 的 `/events` 用例），升级 DSH 后请先跑 `npm test`
 - **实参与类型声明可能不一致**：实测 `session/event` 的 listener 只收到 2 个实参（`Session`、`SessionEvent`），而 inspect 签名写的是 3 个位置参数；插件因此**按对象形状**而非实参位置识别（`type` 字段判事件、`id`+`snapshotEvents()` 判 Session），两种布局都能工作。同类坑：动态宿主半没有 `process`（故动态安装的平台检测恒为 null，走 win32 兼容分支），静态安装是真实 Node 模块、不受此限
 
