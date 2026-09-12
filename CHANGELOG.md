@@ -1,5 +1,22 @@
 # 更新日志
 
+## v0.5.8
+
+**适配 DSH 0.1.5-rc.1 的契约变更**——此前四类提醒静默失效（不报错、不响，最容易被当成"插件坏了"）。全部按当前运行时的真实签名/类型核对后修正，并补上把旧契约钉死的回归测试。其中两条是用**只读动态探针**在真实 DSH 进程里实测发现的，会另记来源：
+
+- **修复动态安装完全装不起来（实测发现）**：`lib/host.js` 里的 `const nodeIo = __nodeIo` 裸引用了一个**只由静态入口 `lib/index.js` 用 `new Function('ctx','harness','__nodeIo', …)` 注入**的标识符。动态安装（把该文件全文粘进 `cordis_define` 的 `code.host`）里这个标识符根本没有声明，于是 `cordis_run` 直接 `ReferenceError: __nodeIo is not defined`。而 README 方式 B 恰恰教用户粘这个文件——**动态安装路径自 v0.5.3 引入静态直通车起就是断的**，没人发现，因为没有测试覆盖"把 lib/host.js 当动态函数体求值"。改为 `typeof __nodeIo !== 'undefined'` 探测（对未声明标识符安全）。新增断言：把 `lib/host.js` 当**动态**函数体（第三参传 undefined）求值并 apply，不得抛错。
+
+- **修正「需要授权」的检测方式：按形状识别，不按实参位置推断**。`session/event` 的**类型声明**是 `(this: Scoped<Session>, session, event)`，看起来 event 在第三个位置；但用运行时探针（`probe-1`，只读）实测，listener 实际只收到**两个**实参：`args[0]=Session`、`args[1]=SessionEvent`（`argCounts={"2":n}`、`eventAt=[1]`、`argTypes` 恒为 `["Session","SessionEvent"]`）。因此**位置推断是个陷阱**：声明 `(session, event)` 就拿到 Session（旧代码即如此，只因恰好参数个数吻合才「碰对」），声明 `(session, second, third)` 则第三个恒为 `undefined`、整个 handler 直接提前返回（本轮修复过程中真实踩到，一个 `if (event === undefined) return` 就把授权音重新关掉了）。现改为遍历实参、挑出「有 string `type` 且带 `data` 字段」的对象作为事件、「有 `id` + `snapshotEvents()`/`append()`」的对象作为 Session——两参/三参/更多布局都能工作，并由测试同时守住这两种布局
+- 同时为 `agent/status` 的 `turn/end` 原因读取加两条兜底路径（`payload.session`、`agents.get(id).session`），避免再次因对象挂载位置变化而静默失效
+- **运行契约的两处文档/实测差异**（记录备查，未改动代码）：① `session/event` 的 inspect 签名声称 3 个位置参数，实测 2 个；② 动态宿主半**没有 `process`/`Buffer`**（实测 `typeof process === 'undefined'`），而 `Builtin.listBuiltins` 文档称可用 `process.platform`——故动态安装下 `PLATFORM` 恒为 `null`，走 win32 兼容分支（本机 Windows 无影响，Linux/macOS 的**动态**安装不可靠，静态安装是真实 Node 模块不受影响）
+- **修复「任务完成 / 子任务完成 / 其他打断」全灭**：旧代码读 `agent.session.events` 取最后一条 `turn/end` 的 `reason.kind`，但当前 `Session` 类**没有** `events` 成员（只有 `ownEvents()` / `snapshotEvents()` / `eventAt()`），`reason` 恒为 `undefined` 并在 `if (reason === undefined) return` 处直接退出。改为 `ownEvents()` 优先、`snapshotEvents()` 兜底（恢复/分叉会话的继承段），只回扫尾部 200 条
+- **修复「目标受阻」永不触发**：Cordis 事件名是 `goal/changed`（带 s），payload 为 `{ agent, change }`（`GoalChanged = { operation, ref?, goal? }`）。旧代码监听的是 `goal/change`——那是**会话日志事件**的名字，不是 Cordis 事件，监听器根本没挂上。判定沿用 `operation === 'block'` 或 `change.goal.phase === 'blocked'`
+- **修复静态安装下「需要授权 / Agent 提问 / 计划评审 / 插件授权」浏览器侧不响**：静态客户端原读 `row.pendingInteraction`，但当前 `SessionSummary` 没有该字段（它由 `dsh-client-ui-session` 单独维护，只经 slot 的 `useSessionPendingInteraction` prop 暴露给 React 组件），恒为 `undefined`。新增宿主 HTTP 端点 `/dsh-chime-alerts/events`，把宿主已检测到的这四类增量下发给浏览器，客户端每 1500ms 拉取播放；宿主**只**对这四类入队，`complete/subcomplete/jobdone/jobfail/goalblocked` 仍由浏览器快照自检，不会双响
+- `dsh.client.inject` 修正：移除当前依赖树中已无任何包引用的 `@deepseek-ai/dsh-client-runtime`，改列真正提供服务包 `sessions` ← `@deepseek-ai/dsh-api-session-controller`、`workspaces` ← `@deepseek-ai/dsh-api-workspace-controller`
+- `lib/types/index.d.ts` 重写：旧声明导出的 `export default function` 与实现（`export const inject` / `export function apply`）不符，且 JSDoc 还写着 PowerShell 蜂鸣与不存在的 README 章节
+- 工具链：`tools/chunk-src.mjs` 增加 `--verify`，`npm test` / `npm run check` 会校验 `.chunks/host.txt`、`.chunks/client.txt` 与源码一致（`.chunks/host.txt` 此前比 `lib/host.js` 落后约 26%，按 README 方式 B 粘贴会装到旧宿主）；新增 `npm run chunks`
+- 测试 247 项（宿主 104 / 客户端 96 / 静态客户端 47），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 只转发四类且 `after` 增量正确、快照 `pendingInteraction` 不再触发；另新增两条「求值形态」回归：把 `lib/host.js` 分别当**动态**（无 `__nodeIo` 注入）与**静态**函数体求值都必须能 apply
+
 ## v0.5.7
 
 - **文档重构**：安装指南改为「静态安装（npm，推荐）→ 动态插件（免安装）」排序；补充 CLI 偶发漏注册 bundle 层时的两处手动检查（`dependencies` + `dsh.profile.bundles`）；删除「前身 dsh-chime / dsh-sound-alerts」历史行；版本号全链路对齐（package.json / 设置页版本标注 / 测试断言）

@@ -1,8 +1,13 @@
 # dsh-chime-alerts bundle layer — applied when a profile lists this bundle
 # （package.json 的 dsh.bundle.patch 指向本文件）。
 # `name` 是包名（从 profile 的 node_modules 解析），不是相对路径。
-# 注意：目前静态安装只有宿主半（事件记录 + 系统蜂鸣）；
-# 浏览器声音与设置页走动态安装（lib/host.js + lib/client.js）。
+#
+# 本条目加载的是**宿主半**：lib/index.js → lib/host.js
+#   （事件记录 + 系统蜂鸣；新端点 /dsh-chime-alerts/events 也在这里注册）
+# 浏览器半不由本条目加载：它在同目录下经 exports["./client"] = lib/client.web.js
+#   被 dsh-client-modules 扫描（package.json 的 dsh.client.platform: "web"），
+#   由 web shell 作为 /plugins 资源取走。
+# 两半合起来是完整静态安装（v0.5.0 起；早期版本确实只有宿主半，此处注释已过时更正）。
 - insert:
     - id: chime
       name: dsh-chime-alerts
