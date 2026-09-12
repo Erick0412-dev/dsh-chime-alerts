@@ -1,0 +1,17 @@
+# 行尾统一为 LF。
+#
+# 背景（实测）：git 默认 core.autocrlf=true 的平台（Windows 常见）检出时会把仓库里的
+# LF 转成 CRLF，于是 lib/*.js 的工作区字节与任何按 LF 生成的产物不一致。
+# 本仓库对 lib/host.js、lib/client.js 的**字节级**校验（tools/chunk-src.mjs --verify，
+# 已挂进 npm test / npm run check）因此会因为平台而异：CRLF 工作区里 .chunks/*.txt
+# 与源码不匹配，npm test 直接失败——而这与代码是否正确无关，纯属行尾噪声。
+#
+# 固定为 LF 后：clone 即得到与仓库一致的字节，chunk 校验在任何平台都成立。
+# 注意 lib/client.web.js 还会作为浏览器经典脚本被读取，LF 同样安全。
+* text=auto eol=lf
+
+# 明确按二进制处理，避免任何转换
+*.png binary
+*.jpg binary
+*.gif binary
+*.zip binary
