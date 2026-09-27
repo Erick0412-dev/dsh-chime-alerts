@@ -1,7 +1,8 @@
 // 静态客户端半逻辑冒烟测试：node tools/test-client-web.mjs（Node 可跑，无需浏览器）
 // 用假 React / window / localStorage / sessions 快照驱动 lib/client.web.js，
-// 断言：ModuleLoader 封套、八类事件的快照检测（complete/subcomplete/jobdone/jobfail/
-// approval/question/planreview/goalblocked）、工作区静音、节流、设置页渲染、自定义音频持久化。
+// 断言：ModuleLoader 封套、三类快照检测（complete/subcomplete/goalblocked）、
+// 六类宿主事件转发（approval/question/planreview/pluginapproval/jobdone/jobfail）、
+// AudioContext 挂起解锁（自动播放策略）、工作区静音、节流、设置页渲染、自定义音频持久化。
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../lib/client.web.js', import.meta.url), 'utf8')
@@ -12,7 +13,7 @@ const ok = (cond, label) => {
   else { failures++; console.log('FAIL', label) }
 }
 
-function makeEnv(seedLocal, seedLib, fetchHandler) {
+function makeEnv(seedLocal, seedLib, fetchHandler, audioFactory) {
   const storage = new Map()
   if (seedLocal !== undefined) storage.set('dsh-chime-alerts-v1', JSON.stringify(seedLocal))
   if (seedLib !== undefined) storage.set('dsh-chime-alerts-v1-audiolib', JSON.stringify(seedLib))
@@ -24,12 +25,15 @@ function makeEnv(seedLocal, seedLib, fetchHandler) {
   let sessSnap = { ids: [], byId: {}, jobsBySession: {} }
   let wsSnap = { items: [] }
 
+  const winListeners = {}
   const win = {
     localStorage: {
       getItem: (k) => (storage.has(k) ? storage.get(k) : null),
       setItem: (k, v) => { storage.set(k, String(v)) },
     },
-    AudioContext: class {
+    // 默认桩：上下文直接可用（running）。用例可传 audioFactory 造
+    // suspended / 拒绝 resume 的变体，见「AudioContext 挂起解锁」回归用例。
+    AudioContext: typeof audioFactory === 'function' ? audioFactory(oscs) : class {
       constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {} }
       resume() { return Promise.resolve() }
       createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
@@ -40,8 +44,12 @@ function makeEnv(seedLocal, seedLib, fetchHandler) {
       play() { audioPlays.push(this.url); return Promise.resolve() }
     },
     FileReader: class {},
-    addEventListener() {},
-    removeEventListener() {},
+    // v0.5.8：记录 window 级监听器，供「自动播放策略解锁」用例触发用户手势
+    addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn) },
+    removeEventListener(type, fn) {
+      const a = winListeners[type]
+      if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1) }
+    },
     focus() {},
     __ModuleLoader__: { load: (spec) => { captured = spec } },
   }
@@ -143,6 +151,12 @@ function makeEnv(seedLocal, seedLib, fetchHandler) {
     overrideFetch(fn) { fetchOverride = fn },
     restoreFetch() { globalThis.fetch = origFetch },
     push: () => {},
+    winListeners,
+    // v0.5.8：触发一次 window 级用户手势（真实浏览器里自动播放策略的解锁时机）
+    gesture(type) {
+      const a = winListeners[type] || []
+      for (const fn of a.slice()) { try { fn({ type }) } catch (err) {} }
+    },
   }
   mod.apply(ctx)
   return env
@@ -205,20 +219,44 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
   ok(env.oscs.length > 0, 'subagent 结束播放（subcomplete）')
 }
 
-// 4. 后台任务完成/失败
+// 4. 后台任务完成/失败：v0.5.8 起不再走快照，改由宿主 /events 转发。
+// DSH 0.1.7 的 SessionListState 没有 jobsBySession（作业列表迁到独立的 jobs 快照，
+// 见 dsh-client-ui-jobs），旧自检分支的 snap.jobsBySession 恒为空对象 → 两类永不响。
 {
+  // 4a. 钉死旧失效路径：即使快照里塞了 jobsBySession 也不该再响（防止回退）
   const env = makeEnv()
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: { s1: [{ id: 'bash-1', kind: 'bash', status: 'running' }] } })
+  const n0 = env.oscs.length
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: { s1: [{ id: 'bash-1', kind: 'bash', status: 'completed' }] } })
-  ok(env.oscs.length > 0, 'bash completed → jobdone 播放')
-  const before = env.oscs.length
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: { s1: [{ id: 'bash-2', kind: 'bash', status: 'running' }] } })
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: { s1: [{ id: 'bash-2', kind: 'bash', status: 'failed' }] } })
-  ok(env.oscs.length > before, 'bash failed → jobfail 播放')
-  const before2 = env.oscs.length
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: { s1: [{ id: 'subagent-job', kind: 'subagent', status: 'running' }] } })
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: { s1: [{ id: 'subagent-job', kind: 'subagent', status: 'failed' }] } })
-  ok(env.oscs.length === before2, 'subagent job 不重复响（跳过）')
+  ok(env.oscs.length === n0, '快照 jobsBySession 不再触发（该字段不存在于 SessionListState）')
+}
+{
+  // 4b. 宿主 /events 的 jobdone / jobfail 必须响（宿主半 jobs.onJobDone 一直检测正常）
+  const env = makeEnv()
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals() // 首轮对齐游标
+  await flush()
+  const n1 = env.oscs.length
+  batch = [{ seq: 2, kind: 'jobdone', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n1, '宿主 /events 的 jobdone → 播放')
+  const n2 = env.oscs.length
+  batch = [{ seq: 3, kind: 'jobfail', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n2, '宿主 /events 的 jobfail → 播放')
 }
 
 // 5. v0.5.8：approval / question / planreview 改由宿主事件端点驱动。
@@ -532,6 +570,75 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } }, jobsBySession: {} })
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } }, jobsBySession: {} })
   ok(env.oscs.length === 0, 'master=false 全部静音')
+}
+
+// 13. v0.5.8 回归：AudioContext 处于 suspended 时，首响不能被静默丢弃。
+// 浏览器自动播放策略下上下文初始就是 suspended，而 resume() 是异步兑现的；旧实现
+// 同步查 state 后直接 return null，于是「页面加载后第一响」与「标签页从后台/睡眠
+// 恢复后第一响」都被吞掉——而人不在标签页时恰恰最需要出声。
+{
+  const env = makeEnv(undefined, undefined, undefined, (oscs) => class {
+    constructor() { this.state = 'suspended'; this.currentTime = 0; this.destination = {}; this.listeners = {} }
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn) }
+    // 真实浏览器里 resume() 是异步兑现的：这里用微任务模拟，落地后才变 running
+    resume() {
+      return Promise.resolve().then(() => {
+        this.state = 'running'
+        for (const fn of (this.listeners['statechange'] || []).slice()) { try { fn({ type: 'statechange' }) } catch (err) {} }
+      })
+    }
+    createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
+  })
+  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } } })
+  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } } })
+  ok(env.oscs.length === 0, 'suspended：resume 落地前尚未调度（异步等待，而非同步判空）')
+  await flush()
+  ok(env.oscs.length > 0, 'suspended → resume 落地后仍然出声（旧实现此处静默丢弃）')
+}
+
+// 13b. resume() 被自动播放策略拒绝（还没有任何用户手势）时不能直接丢：
+// 先排队，等首次用户手势解锁后补响。
+{
+  let allowResume = false
+  const env = makeEnv(undefined, undefined, undefined, (oscs) => class {
+    constructor() { this.state = 'suspended'; this.currentTime = 0; this.destination = {} }
+    resume() { return Promise.resolve().then(() => { if (allowResume) this.state = 'running' }) }
+    createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
+  })
+  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } } })
+  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } } })
+  await flush()
+  ok(env.oscs.length === 0, '自动播放策略拒绝 resume 时暂不出声')
+  ok((env.winListeners['pointerdown'] || []).length > 0, '已挂上用户手势解锁监听器')
+  allowResume = true
+  env.gesture('pointerdown')
+  await flush()
+  ok(env.oscs.length > 0, '首次用户手势后补响排队的提示音（不再永久丢失）')
+  ok((env.winListeners['pointerdown'] || []).length === 0, '解锁后摘掉手势监听器')
+}
+
+// 13c. 排队的提示音过期后不再补响（避免解锁瞬间炸出一串早已无关的旧音）
+{
+  let allowResume = false
+  const env = makeEnv(undefined, undefined, undefined, (oscs) => class {
+    constructor() { this.state = 'suspended'; this.currentTime = 0; this.destination = {} }
+    resume() { return Promise.resolve().then(() => { if (allowResume) this.state = 'running' }) }
+    createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
+  })
+  const realNow = Date.now
+  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } } })
+  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } } })
+  await flush()
+  ok(env.oscs.length === 0, '13c 前置：仍处于未解锁状态')
+  Date.now = () => realNow() + 60000 // 把时钟推过 PENDING_TTL_MS（15s）
+  allowResume = true
+  env.gesture('pointerdown')
+  await flush()
+  Date.now = realNow
+  ok(env.oscs.length === 0, '过期排队的提示音不再补响')
 }
 
 if (failures === 0) console.log('all client-web tests passed')

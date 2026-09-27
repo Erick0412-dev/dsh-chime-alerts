@@ -17,7 +17,9 @@
 - `dsh.client.inject` 修正：移除当前依赖树中已无任何包引用的 `@deepseek-ai/dsh-client-runtime`，改列真正提供服务包 `sessions` ← `@deepseek-ai/dsh-api-session-controller`、`workspaces` ← `@deepseek-ai/dsh-api-workspace-controller`
 - `lib/types/index.d.ts` 重写：旧声明导出的 `export default function` 与实现（`export const inject` / `export function apply`）不符，且 JSDoc 还写着 PowerShell 蜂鸣与不存在的 README 章节
 - 工具链：`tools/chunk-src.mjs` 增加 `--verify`，`npm test` / `npm run check` 会校验 `.chunks/host.txt`、`.chunks/client.txt` 与源码一致（`.chunks/host.txt` 此前比 `lib/host.js` 落后约 26%，按 README 方式 B 粘贴会装到旧宿主）；新增 `npm run chunks`
-- 测试 247 项（宿主 104 / 客户端 96 / 静态客户端 47），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 只转发四类且 `after` 增量正确、快照 `pendingInteraction` 不再触发；另新增两条「求值形态」回归：把 `lib/host.js` 分别当**动态**（无 `__nodeIo` 注入）与**静态**函数体求值都必须能 apply
+- **修复静态安装下「后台任务完成 / 后台任务失败」永不响（同类静默失效，本次一并补上）**：DSH 0.1.7 起 `SessionListState` 已无 `jobsBySession`（作业列表迁到独立的 `jobs` 快照，见 `dsh-client-ui-jobs`），静态客户端旧自检分支的 `snap.jobsBySession || {}` 恒为空对象 → `jobdone`/`jobfail` 在浏览器侧永远不响。宿主半的 `jobs.onJobDone` 一直检测正常，只是这两类被挡在 `CLIENT_PULL_KINDS` 之外；现把 `jobdone`/`jobfail` 加入该队列，并删除已失效的客户端快照分支，使 `/dsh-chime-alerts/events` 成为这两类的唯一来源（不会双响）
+- **修复静态客户端「页面加载后第一响 / 从后台恢复后第一响」被静默吞掉（AudioContext 解锁竞态）**：浏览器自动播放策略下 `AudioContext` 初始为 `suspended`，而 `resume()` 是**异步**兑现的；旧实现同步查 `state` 后直接 `return null`，`playBrowser` 随即以 `false` 结束，提示音被丢弃且无重试、无队列。改为等 `resume()` 落地后再判定是否可播；仍未解锁则进入**有界等待队列**（同类只留最新一条、上限 8 条、15 秒过期），在首次用户手势（`pointerdown`/`keydown`/`touchstart`，自动播放策略允许的时机）或上下文 `statechange` 恢复时补响。注：动态半 `lib/client.js` 本就有 `await resumePromise`（静态半当初移植时漏了这一句），故本次只改静态半
+- 测试 261 项（宿主 110 / 客户端 96 / 静态客户端 55），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 转发六类且 `after` 增量正确、快照 `pendingInteraction`/`jobsBySession` 均不再触发、`/events` 必须下发 `jobdone`/`jobfail`（subagent 与 killed 跳过）、`suspended` 上下文在 `resume` 落地后仍须出声、`resume` 被拒时排队并在首次手势后补响、排队条目过期后不再补响；另新增两条「求值形态」回归：把 `lib/host.js` 分别当**动态**（无 `__nodeIo` 注入）与**静态**函数体求值都必须能 apply
 
 ## v0.5.7
 
