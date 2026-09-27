@@ -656,7 +656,9 @@ function sessionEventThreeArg(env, session, event) {
     }
     const empty = await call('/dsh-chime-alerts/events?after=0')
     ok(empty.status === 200 && empty.data.ok === true && empty.data.events.length === 0, '/events 初始为空')
-    ok(Array.isArray(empty.data.kinds) && empty.data.kinds.indexOf('approval') >= 0 && empty.data.kinds.indexOf('jobdone') >= 0 && empty.data.kinds.indexOf('jobfail') >= 0 && empty.data.kinds.indexOf('complete') < 0, '/events kinds 只含需转发的六类（含 jobdone/jobfail）')
+    ok(Array.isArray(empty.data.kinds) && empty.data.kinds.indexOf('approval') >= 0 && empty.data.kinds.indexOf('jobdone') >= 0 && empty.data.kinds.indexOf('jobfail') >= 0, '/events kinds 含 approval 与 jobdone/jobfail')
+    ok(empty.data.kinds.indexOf('complete') >= 0 && empty.data.kinds.indexOf('subcomplete') >= 0 && empty.data.kinds.indexOf('interrupt') >= 0, '/events kinds 含 complete/subcomplete/interrupt（判定权已归宿主）')
+    ok(empty.data.kinds.indexOf('goalblocked') < 0, '/events kinds 不含 goalblocked（projectionValues.goal 仍在，由浏览器快照自检，避免双响）')
 
     // 三类入队 + complete 不入队
     sessionEvent(env, { id: 'root' }, { type: 'approval/asked', data: { toolName: 'write' } })
@@ -668,7 +670,7 @@ function sessionEventThreeArg(env, session, event) {
     const first = await call('/dsh-chime-alerts/events?after=0')
     const kinds = first.data.events.map((e) => e.kind)
     ok(kinds.indexOf('approval') >= 0 && kinds.indexOf('question') >= 0 && kinds.indexOf('planreview') >= 0, '/events 转发 approval/question/planreview')
-    ok(kinds.indexOf('complete') < 0, '/events 不转发 complete（浏览器快照自检，避免双响）')
+    ok(kinds.indexOf('complete') >= 0, '/events 转发 complete（快照的 pendingInteraction 守卫恒真，旧路径会误判成完成）')
     ok(first.data.events.every((e) => typeof e.seq === 'number'), '/events 每条带递增 seq')
 
     // after 增量：用返回的 seq 再拉应无新事件
@@ -738,7 +740,7 @@ function sessionEventThreeArg(env, session, event) {
   ok(status2 === 200 && kinds2.indexOf('jobdone') >= 0, '/events 转发 jobdone（快照已失效，改由宿主下发）')
   ok(kinds2.indexOf('jobfail') >= 0, '/events 转发 jobfail')
   ok(kinds2.filter((k) => k === 'jobdone').length === 1 && kinds2.filter((k) => k === 'jobfail').length === 1, '完成/失败作业各入队一次（subagent 与 killed 跳过）')
-  ok(kinds2.indexOf('complete') < 0, 'complete 仍不入队（浏览器快照自检，避免双响）')
+  ok(kinds2.indexOf('goalblocked') < 0, 'goalblocked 不入队（仍由浏览器快照自检，避免双响）')
 }
 
 console.log(failures === 0 ? '\nall host tests passed' : `\n${failures} host test(s) FAILED`)

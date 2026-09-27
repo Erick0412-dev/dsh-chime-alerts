@@ -20,7 +20,7 @@
 本仓库的 package.json 形态（`dsh.bundle.patch` + `exports` types/default + `publishConfig` + `files` + Node 测试）已按社区静态 bundle 模板验证：
 - `dsh.bundle.patch` → `cordis.patch.yml`（`insert: [{ id, name: 包名 }]`）让 `dsh plugin --profile <name> add <包>` 一键安装
 - 完整静态双端 = `exports["./client"]`（`window.__ModuleLoader__.load` 经典脚本封套）+ `dsh.client: { platform: "web", inject: [客户端服务模块 id] }`
-- 客户端检测可以**不需要宿主桥**：inject `sessions`/`workspaces` 服务订阅快照（`running` / goal 投影；`pendingInteraction` 与 `jobsBySession` 分别在 DSH 0.1.5 / 0.1.7 起已不在 `SessionSummary` / `SessionListState` 内，须走宿主 `/events` 桥）
+- 客户端检测可以**不需要宿主桥**：inject `sessions`/`workspaces` 服务订阅快照（只保留 goal 投影——`pendingInteraction` 与 `jobsBySession` 分别在 DSH 0.1.5 / 0.1.7 起已不在 `SessionSummary` / `SessionListState` 内；`complete`/`subcomplete`/`interrupt` 原先也用 `pendingInteraction` 守卫、恒真会误判，故与前述各类一并须走宿主 `/events` 桥）
 - 设置页插槽一致（`settings.section`），label 支持 `() => string` 函数形式；样式用 `<style data-plugin data-plugin-css>` + HMR 去重
 
 ## 各市场提交入口

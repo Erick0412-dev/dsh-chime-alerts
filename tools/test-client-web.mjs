@@ -162,6 +162,30 @@ function makeEnv(seedLocal, seedLib, fetchHandler, audioFactory) {
   return env
 }
 
+/**
+ * 让一个 env 通过宿主 /events 通道收事件。v0.5.8 起 complete / subcomplete /
+ * interrupt 也不再由快照判定，一律走这条通道，所以涉及回合结束的用例必须用它。
+ * 调用前先 `env.runIntervals(); await flush()` 对齐游标（首轮不补响历史事件）。
+ * 返回 deliver(kind, sessionId) 投递一个事件。
+ */
+function hostEventsDriver(env) {
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  return function deliver(kind, sessionId) {
+    batch = [{ seq: seq + 1, kind, sessionId: sessionId || 's1', at: Date.now() }]
+    env.runIntervals()
+  }
+}
+
 /** 递归渲染 createElement 树，返回所有真实 DOM 型节点。 */
 function render(node) {
   const out = []
@@ -200,13 +224,38 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
   ok(Array.isArray(env.inject) && env.inject.indexOf('workspaces') >= 0, 'inject 声明 workspaces')
 }
 
-// 2. 主会话回合结束 → complete
+// 2. 主会话回合结束 → complete：v0.5.8 起改由宿主 /events 转发
 {
+  // 2a. 钉死旧失效路径：快照 running true→false 再也不该响（防止回退）。
+  // 旧判定是「running true→false 且 !row.pendingInteraction」，而 DSH 0.1.7 的
+  // SessionSummary 没有 pendingInteraction → 该守卫恒真 → 一个正在等待授权的
+  // 回合结束时会被误判成「完成」，与授权音叠在一起（用户听到的爆音）。
   const env = makeEnv()
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true, blank: false } }, jobsBySession: {} })
   env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false, blank: false } }, jobsBySession: {} })
-  ok(env.oscs.length > 0, 'running→false 播放合成音（complete）')
-  const first = env.oscs[0]
+  ok(env.oscs.length === 0, '快照 running→false 不再判定完成（判定权已归宿主）')
+
+  // 2b. 宿主 /events 的 complete 必须响
+  const env2 = makeEnv()
+  let seq = 0
+  let batch = []
+  env2.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env2.runIntervals()
+  await flush() // 首轮对齐游标
+  const n0 = env2.oscs.length
+  batch = [{ seq: 2, kind: 'complete', sessionId: 's1', at: Date.now() }]
+  env2.runIntervals()
+  await flush()
+  ok(env2.oscs.length > n0, '宿主 /events 的 complete → 播放')
+  const first = env2.oscs[n0]
   ok(first !== undefined && first.frequency !== undefined, '振荡器已创建')
 }
 
@@ -216,7 +265,28 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
   env.setWorkspaces([{ workspaceId: 'w1', title: 'K230', sessionIds: ['root'] }])
   env.setSessions({ ids: ['root', 'sub1'], byId: { root: { id: 'root', running: false }, sub1: { id: 'sub1', origin: 'subagent', parentId: 'root', running: true } }, jobsBySession: {} })
   env.setSessions({ ids: ['root', 'sub1'], byId: { root: { id: 'root', running: false }, sub1: { id: 'sub1', origin: 'subagent', parentId: 'root', running: false } }, jobsBySession: {} })
-  ok(env.oscs.length > 0, 'subagent 结束播放（subcomplete）')
+  ok(env.oscs.length === 0, '快照不再判定 subcomplete（判定权已归宿主）')
+
+  // 3b. 宿主 /events 的 subcomplete 必须响（宿主侧按 parentId 归属根）
+  const env2 = makeEnv({ master: true, webBeep: true, notifyEnabled: false, muted: [], kinds: { subcomplete: { enabled: true, sound: 'default', volume: 1 } } })
+  let seq = 0
+  let batch = []
+  env2.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env2.runIntervals()
+  await flush()
+  const n0 = env2.oscs.length
+  batch = [{ seq: 2, kind: 'subcomplete', sessionId: 'root', at: Date.now() }]
+  env2.runIntervals()
+  await flush()
+  ok(env2.oscs.length > n0, '宿主 /events 的 subcomplete → 播放')
 }
 
 // 4. 后台任务完成/失败：v0.5.8 起不再走快照，改由宿主 /events 转发。
@@ -590,8 +660,10 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
     createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
     createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
   })
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } } })
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } } })
+  const drive = hostEventsDriver(env)
+  env.runIntervals()
+  await flush() // 首轮只对齐游标
+  drive('complete')
   ok(env.oscs.length === 0, 'suspended：resume 落地前尚未调度（异步等待，而非同步判空）')
   await flush()
   ok(env.oscs.length > 0, 'suspended → resume 落地后仍然出声（旧实现此处静默丢弃）')
@@ -607,8 +679,10 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
     createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
     createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
   })
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } } })
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } } })
+  const drive = hostEventsDriver(env)
+  env.runIntervals()
+  await flush() // 首轮只对齐游标
+  drive('complete')
   await flush()
   ok(env.oscs.length === 0, '自动播放策略拒绝 resume 时暂不出声')
   ok((env.winListeners['pointerdown'] || []).length > 0, '已挂上用户手势解锁监听器')
@@ -619,7 +693,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
   ok((env.winListeners['pointerdown'] || []).length === 0, '解锁后摘掉手势监听器')
 }
 
-// 13c. 排队的提示音过期后不再补响（避免解锁瞬间炸出一串早已无关的旧音）
+// 13c. 陈到没有意义的排队提示音不再补响（避免解锁瞬间炸出一串早已无关的旧音）
 {
   let allowResume = false
   const env = makeEnv(undefined, undefined, undefined, (oscs) => class {
@@ -629,16 +703,161 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
     createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
   })
   const realNow = Date.now
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: true } } })
-  env.setSessions({ ids: ['s1'], byId: { s1: { id: 's1', running: false } } })
+  const drive = hostEventsDriver(env)
+  env.runIntervals()
+  await flush() // 首轮只对齐游标
+  drive('complete')
   await flush()
   ok(env.oscs.length === 0, '13c 前置：仍处于未解锁状态')
-  Date.now = () => realNow() + 60000 // 把时钟推过 PENDING_TTL_MS（15s）
+  Date.now = () => realNow() + 180000 // 推过 PENDING_STALE_MS（120s）
   allowResume = true
   env.gesture('pointerdown')
   await flush()
   Date.now = realNow
-  ok(env.oscs.length === 0, '过期排队的提示音不再补响')
+  ok(env.oscs.length === 0, '超过 PENDING_STALE_MS 的排队提示音不再补响')
+}
+
+// 13d. 超过新鲜窗口、但仍在可救范围内的排队提示音必须补响。
+// 旧实现把整批一起丢掉：从事件发生到用户首次手势只要超过 15s，
+// 用户正在等的那一声就静默消失（既无日志也无兜底）。这里钉住「绝不静默丢弃最新一条」。
+{
+  let allowResume = false
+  const env = makeEnv(undefined, undefined, undefined, (oscs) => class {
+    constructor() { this.state = 'suspended'; this.currentTime = 0; this.destination = {} }
+    resume() { return Promise.resolve().then(() => { if (allowResume) this.state = 'running' }) }
+    createOscillator() { const o = { type: 'sine', frequency: { value: 0 }, connect() {}, start() {}, stop() {} }; oscs.push(o); return o }
+    createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} } }
+  })
+  const realNow = Date.now
+  const drive = hostEventsDriver(env)
+  env.runIntervals()
+  await flush() // 首轮只对齐游标
+  drive('complete')
+  await flush()
+  ok(env.oscs.length === 0, '13d 前置：仍处于未解锁状态')
+  Date.now = () => realNow() + 60000 // 超过 PENDING_TTL_MS（15s），但仍在 PENDING_STALE_MS（120s）内
+  allowResume = true
+  env.gesture('pointerdown')
+  await flush()
+  Date.now = realNow
+  ok(env.oscs.length > 0, '超过新鲜窗口的最新排队提示音仍会补响（不再静默丢弃）')
+}
+
+// 14. 音频 1+3：并发提示音错开调度 + 共享主总线（内置压缩器兜底）。
+// 旧实现里每个音符的 gain 直接接 ac.destination 且都从 currentTime + 0.02 起算，
+// 两个提示音碰在一起就同刻叠加、峰值 >1.0 硬削波（用户报告的「爆音」）。
+{
+  const log = []
+  const env = makeEnv(undefined, undefined, undefined, () => class {
+    constructor() { this.state = 'running'; this.currentTime = 0; this.destination = { kind: 'destination' } }
+    createGain() {
+      return {
+        gain: { value: 1, setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+        connect(t) {
+          let to = 'nil'
+          if (t) {
+            if (t.kind === 'destination') to = 'destination'
+            else if (t.kind === 'compressor') to = 'compressor'
+            else if (t.gain && t.gain.value === 0.85) to = 'master'
+            else to = 'unknown'
+          }
+          log.push({ from: 'gain', to })
+        },
+      }
+    }
+    createDynamicsCompressor() {
+      return {
+        kind: 'compressor',
+        threshold: { value: 0 }, knee: { value: 0 }, ratio: { value: 0 },
+        attack: { value: 0 }, release: { value: 0 },
+        connect(t) { log.push({ from: 'compressor', to: t && t.kind === 'destination' ? 'destination' : 'unknown' }) },
+      }
+    }
+    createOscillator() {
+      return { type: 'sine', frequency: { value: 0 }, connect() {}, start(t) { log.push({ from: 'osc', t }) }, stop() {} }
+    }
+  })
+  let seq = 0
+  let batch = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: batch }
+      batch = []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals()
+  await flush() // 首轮对齐游标
+
+  batch = [{ seq: 2, kind: 'complete', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  const startsA = log.filter((e) => e.from === 'osc').map((e) => e.t)
+  ok(startsA.length > 0, '14 前置：第一个提示音已调度')
+  const tA = Math.min.apply(null, startsA)
+
+  const mark = log.length
+  batch = [{ seq: 3, kind: 'question', sessionId: 's1', at: Date.now() }]
+  env.runIntervals()
+  await flush()
+  const startsB = log.slice(mark).filter((e) => e.from === 'osc').map((e) => e.t)
+  ok(startsB.length > 0, '14：第二个提示音已调度')
+  const tB = Math.min.apply(null, startsB)
+  ok(tB > tA, '并发提示音错开起音（不再与上一声同刻叠加）')
+
+  ok(log.filter((e) => e.from === 'gain' && e.to === 'destination').length === 0, '音符 gain 不再直连 destination（改走主总线）')
+  ok(log.some((e) => e.from === 'gain' && e.to === 'master'), '音符 gain 汇入共享主总线')
+  ok(log.some((e) => e.from === 'gain' && e.to === 'compressor'), '主总线接内置压缩器')
+  ok(log.filter((e) => e.from === 'compressor' && e.to === 'destination').length === 1, 'destination 只被压缩器接入一次（安全网生效）')
+}
+
+// 15. 宿主桥：一次瞬时失败不得永久关闭通道。
+// 旧实现把 hostApiAvailable 置 false 后 pollHostEvents 开头直接 return，
+// 于是任何一次瞬时失败都会让 approval/question/planreview/jobdone/jobfail
+// 全部静默到刷新页面——「有些时候不会出声」的随机性来源之一。
+{
+  const env = makeEnv()
+  let failing = false
+  let seq = 0
+  const events = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      if (failing) return Promise.reject(new Error('transient'))
+      seq += 1
+      const body = { ok: true, boot: 'b', seq, events: events.splice(0) }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  env.runIntervals()
+  await flush()
+  const callCount = () => env.fetchCalls.filter((c) => c.url.indexOf('/events') >= 0).length
+  const before = callCount()
+  ok(before > 0, '轮询已发起')
+
+  failing = true
+  env.runIntervals()
+  await flush()
+  const afterFail = callCount()
+  ok(afterFail > before, '失败那次确实发起了请求')
+
+  // 退避窗口过后必须继续重试
+  failing = false
+  const realNow = Date.now
+  Date.now = () => realNow() + 60000
+  env.runIntervals()
+  await flush()
+  Date.now = realNow
+  ok(callCount() > afterFail, '一次瞬时失败后仍会重试（旧实现此处永久不再发请求）')
+
+  // 通道恢复后事件照常播放
+  const n0 = env.oscs.length
+  events.push({ seq: 99, kind: 'approval', sessionId: 's1', at: Date.now() })
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length > n0, '恢复后宿主事件照常播放')
 }
 
 if (failures === 0) console.log('all client-web tests passed')
