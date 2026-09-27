@@ -173,8 +173,12 @@ function hostEventsDriver(env) {
   let batch = []
   env.overrideFetch((u) => {
     if (u.indexOf('/events') >= 0) {
+      // 忠实模拟宿主：队列常驻，且按 ev.seq > after 过滤。过滤发生在宿主侧，
+      // 客户端不复查序号——假驱动若不过滤，「游标被卡死」类用例会假绿。
+      const m = /after=([0-9]+)/.exec(u)
+      const after = m ? Number(m[1]) : 0
       seq += 1
-      const body = { ok: true, boot: 'b', seq, events: batch }
+      const body = { ok: true, boot: 'b', seq, events: batch.filter((e) => e.seq > after) }
       batch = []
       return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
     }
@@ -357,6 +361,51 @@ const flush = () => new Promise((r) => setTimeout(r, 0))
   env.runIntervals()
   await flush()
   ok(env.oscs.length === 0, '/events 首轮只对齐游标（不补响历史）')
+}
+{
+  // 5d. 宿主重启（boot 换代、seq 归零）后，本页游标必须跟着归零。
+  // 旧实现只推进 seq 而完全忽略 data.boot：宿主重启把 seq 清零后，本页仍在请求
+  // after=5，而**过滤发生在宿主侧**（ev.seq > after），新事件 seq 1/2/3… 全被挡掉；
+  // line 322 的 `data.seq > hostEventSeq` 也修不回来（新 seq 只会更小）→ 该标签页对
+  // 所有经宿主转发的提醒彻底失声，只有刷新页面才能恢复。用户实测：同一页面手机有
+  // 声音、电脑（长开的标签页）完全没声音，刷新后立刻恢复。
+  const env = makeEnv()
+  let boot = 'b1'
+  let high = 0
+  let recorded = []
+  env.overrideFetch((u) => {
+    if (u.indexOf('/events') >= 0) {
+      const m = /after=([0-9]+)/.exec(u)
+      const after = m ? Number(m[1]) : 0
+      const body = { ok: true, boot, seq: high, events: recorded.filter((e) => e.seq > after) }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }
+    return null
+  })
+  const hRecord = (kind) => {
+    high += 1
+    recorded.push({ seq: high, kind, sessionId: 's1', at: Date.now() })
+    env.runIntervals()
+  }
+  env.runIntervals()
+  await flush() // 首轮对齐游标（boot b1）
+  for (let i = 0; i < 5; i++) { hRecord('approval'); await flush() }
+  const n1 = env.oscs.length
+  ok(n1 > 0, '宿主重启前：事件正常播放')
+  ok(high === 5, '驱动已把宿主 seq 推到 5')
+
+  // 宿主重启：boot 换代，seq 从 0 重新计数，旧队列丢弃
+  boot = 'b2'
+  high = 0
+  recorded = []
+  env.runIntervals()
+  await flush()
+  ok(env.oscs.length === n1, '宿主换代当轮只归零游标、不补响历史事件')
+
+  // 新宿主记下第一条事件，seq 从 1 开始——必须仍然响
+  hRecord('complete')
+  await flush()
+  ok(env.oscs.length > n1, '宿主重启后 seq 从头计数仍能响（游标已随 boot 归零）')
 }
 {
   // 5c. 首轮之后的新事件：approval / question / planreview / pluginapproval 都要响

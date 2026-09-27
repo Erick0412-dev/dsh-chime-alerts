@@ -23,7 +23,8 @@
 - **修复音频链路的硬削波（「爆音」的另一半）**：每条音符的 `gain` 原本直接接 `ac.destination`，整条链路没有任何余量——单个提示音峰值约 0.55，两个提示音碰在一起就超过 1.0 硬削波。新增**共享主总线**（`MASTER_GAIN = 0.85` → 内置 `DynamicsCompressorNode`（threshold -6 / knee 3 / ratio 12）→ destination），压缩器只作安全网、阈值卡在单个提示音峰值之上，**不参与音色**；环境缺少 `createDynamicsCompressor` 时自动退回直连。另新增 `nextFreeAt` **错开调度**：总线空闲仍立刻起音（零延迟行为不变），被上一声占着则顺延 `CHIME_GAP = 0.12s`，并发提示音不再同刻叠加
 - **修复解锁等待队列会把用户正在等的那一声静默丢掉**：旧队列按「超过 15 秒一律 `continue`」处理——页面刚加载（`AudioContext` 处于 `suspended`）时排队的提示音，只要用户隔了 15 秒以上才做出首次手势（例如读完授权提示再点「授权」），就被无声丢弃，既无日志也无兜底。现保留「旧条目不再补响」以避免解锁瞬间炸出一串旧音，但**最新一条在 120 秒硬上限内必定补响**（新增 `PENDING_STALE_MS`）
 - **修复宿主事件通道会被一次瞬时失败永久关闭**：`loadHostBeep()` 与 `pollHostEvents()` 的 `catch` 都把 `hostApiAvailable` 置 `false`，而 `pollHostEvents` 开头据此直接 `return`——启动瞬间端点尚未就绪、请求超时等任何一次瞬时失败，都会让 `approval`/`question`/`planreview`/`pluginapproval`/`jobdone`/`jobfail` 全部静默，直到刷新页面（这正是「有些时候不会出声」的随机性来源之一）。现改为**退避重试**：连续失败间隔 1.5s→3s→…上限 30s，成功一次立刻清零；连续 3 次失败才在设置页标记不可用，但通道仍按退避重试，绝不永久关闭
-- 测试 278 项（宿主 112 / 客户端 96 / 静态客户端 70），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 转发九类且 `after` 增量正确、快照 `pendingInteraction`/`jobsBySession` 均不再触发、`/events` 必须下发 `jobdone`/`jobfail`（subagent 与 killed 跳过）、`suspended` 上下文在 `resume` 落地后仍须出声、`resume` 被拒时排队并在首次手势后补响、排队条目过期后不再补响；另新增两条「求值形态」回归：把 `lib/host.js` 分别当**动态**（无 `__nodeIo` 注入）与**静态**函数体求值都必须能 apply；本轮续增：`/events` 的 `kinds` 必须含 `complete`/`subcomplete`/`interrupt`（且不含 `goalblocked`）、快照 `running→false` 不得判定 `complete`/`subcomplete`、宿主 `/events` 的 `complete`/`subcomplete` 必须播放、并发提示音必须错开起音且音符 `gain` 不得直连 `destination`（须经主总线→压缩器）、排队条目超过新鲜窗口但未超硬上限仍须补响、宿主通道一次瞬时失败后必须重试并恢复播放
+- **修复「宿主重启后本标签页彻底失声」——静态客户端漏了 boot 令牌守卫（用户实测发现）**：`pollHostEvents()` 只把「已播到第几条」记在内存里（`hostEventSeq`），且**从不读 `data.boot`**。宿主每次重启都会把 `seq` 计数清零，于是重启后本页仍在请求 `after=旧值`（例如 5），而新宿主的事件是 `seq` 1/2/3…——**过滤发生在宿主侧**（`ev.seq > after`），全部被挡掉；同一函数末尾的 `data.seq > hostEventSeq` 也修不回来（新 `seq` 只会更小）。结果：经宿主转发的**全部九类**提醒此后在这个标签页永久静默，只有刷新页面才能恢复。动态半 `lib/client.js` 一直有这道守卫（`res.boot !== myBoot → lastSeq = 0`），静态半当初移植时漏了——与本轮 `resumePromise` 漏写是同一类错误。实测现象：同一个页面手机一直有声音、电脑（长开的标签页）**完全没有声音**，刷新后立刻恢复；同时段宿主侧 `kinds` 与事件记录都正常，故与宿主无关。现补上 boot 令牌：换代即把游标归零并对齐到新宿主（不补响历史事件，与新开页面一致）
+- 测试 282 项（宿主 112 / 客户端 96 / 静态客户端 74），新增契约回归：旧两参 `session/event` **不得**触发授权、仅带 `.events` 的 Session **不得**判完成、`ownEvents()` 为空时回退 `snapshotEvents()`、`/events` 转发九类且 `after` 增量正确、快照 `pendingInteraction`/`jobsBySession` 均不再触发、`/events` 必须下发 `jobdone`/`jobfail`（subagent 与 killed 跳过）、`suspended` 上下文在 `resume` 落地后仍须出声、`resume` 被拒时排队并在首次手势后补响、排队条目过期后不再补响；另新增两条「求值形态」回归：把 `lib/host.js` 分别当**动态**（无 `__nodeIo` 注入）与**静态**函数体求值都必须能 apply；本轮续增：`/events` 的 `kinds` 必须含 `complete`/`subcomplete`/`interrupt`（且不含 `goalblocked`）、快照 `running→false` 不得判定 `complete`/`subcomplete`、宿主 `/events` 的 `complete`/`subcomplete` 必须播放、并发提示音必须错开起音且音符 `gain` 不得直连 `destination`（须经主总线→压缩器）、排队条目超过新鲜窗口但未超硬上限仍须补响、宿主通道一次瞬时失败后必须重试并恢复播放、宿主重启（`boot` 换代、`seq` 归零）后游标必须跟着归零且新宿主 `seq` 从 1 重新计数仍须播放
 
 ## v0.5.7
 
@@ -186,7 +187,7 @@
 
 ## v0.3.13
 
-- **存储位置跟随 DSH 目录**：DSH 以管理员身份启动时进程 cwd=System32，导致沙箱 `workspaceRoot` 落在系统目录、插件数据写进 `C:\Windows\System32`。现检测到系统目录时自动改用 **DSH 数据目录** `%USERPROFILE%\.dsh\plugins\dsh-chime-alerts\`（经 `cmd /c echo %USERPROFILE%` 解析用户主目录，失败则回退原路径）；普通工作区场景行为不变
+- **存储位置跟随 DSH 目录**：DSH 以管理员身份启动时进程 cwd=System32，导致沙箱 `workspaceRoot` 落在系统目录、插件数据写进 `C:\Windows\System32`。现检测到系统目录时自动改用 **DSH 数据目录** `%USERPROFILE%\.dsh\plugins\dsh-chime-alerts`（经 `cmd /c echo %USERPROFILE%` 解析用户主目录，失败则回退原路径）；普通工作区场景行为不变
 - **旧数据自动迁移**：`workspaceRoot` 系统目录里已写入的 `dsh-chime-alerts-settings.json` / 音频清单 / 音频文件在首次启动时自动复制到新位置（旧文件保留，可手动删除）
 - 测试 +5（系统目录→DSH 目录 / cmd 解析 / sysget 路径 / 旧数据迁移 / 普通工作区不变），宿主 37 项、客户端 55 项、合计 92 项
 
